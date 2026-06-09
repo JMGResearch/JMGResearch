@@ -1,0 +1,22 @@
+[Unit]
+Description=Reset-Rollout verify and store incoming encrypted artifacts (local-only)
+After=local-fs.target
+
+[Service]
+Type=simple
+User=storage_agent
+Group=storage_agent
+Environment="INCOMING_DIR=/mnt/wdwork/incoming"
+Environment="FINAL_DIR=/opt/storage/archives"
+ExecStart=/usr/local/bin/verify_and_store.sh
+Restart=on-failure
+PrivateNetwork=yes
+IPAddressDeny=any
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
