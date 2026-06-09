@@ -1,6 +1,6 @@
 # JMGResearch
 
-A collection of investigative work andlvarious ai generated code.
+A collection of investigative work and various ai generated code.
 I can read and alter code but haven't sat down and learned how to properly
 write code yet. With that being said, please USE AT YOUR OWN RISK.
 
