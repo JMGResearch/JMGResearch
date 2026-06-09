@@ -9,6 +9,10 @@
 #
 # Requirements:
 #   sudo apt install live-build debootstrap squashfs-tools xorriso isolinux
+#
+# Note: Certificates are sourced from /reset-rollout-certs/ on the forensic USB
+# (mounted at /mnt/wddata during runtime). If certs exist at SCRIPT_DIR/certs/,
+# they will be included in the ISO for testing/development purposes.
 #==============================================================================
 
 set -euo pipefail
@@ -22,6 +26,7 @@ NC='\033[0m'
 
 info()  { echo -e "${CYAN}[*] $1${NC}"; }
 pass()  { echo -e "${GREEN}[OK] $1${NC}"; }
+warn()  { echo -e "${AMBER}[WARN] $1${NC}"; }
 fatal() { echo -e "${RED}[FATAL] $1${NC}"; exit 1; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -146,6 +151,7 @@ write_hooks() {
     info "Writing build hooks..."
     mkdir -p "$BUILD_DIR/config/hooks/live"
     mkdir -p "$BUILD_DIR/config/includes.chroot/opt/reset-rollout"
+    mkdir -p "$BUILD_DIR/config/includes.chroot/opt/reset-rollout/certs"
     mkdir -p "$BUILD_DIR/config/includes.chroot/etc/profile.d"
 
     # Copy Reset-Rollout core library into the image
@@ -164,6 +170,22 @@ write_hooks() {
         cp -a "$SCRIPT_DIR/tools"/* "$BUILD_DIR/config/includes.chroot/opt/reset-rollout/tools/" 2>/dev/null || true
         chmod -R +x "$BUILD_DIR/config/includes.chroot/opt/reset-rollout/tools/" 2>/dev/null || true
         pass "tools/ directory copied to image."
+    fi
+
+    # Copy certificates if they exist in SCRIPT_DIR/certs/ (for testing/dev)
+    # In production, certs come from the WDDATA USB mounted at /mnt/wddata
+    if [[ -d "$SCRIPT_DIR/certs" ]] && [[ -n "$(find "$SCRIPT_DIR/certs" -type f 2>/dev/null)" ]]; then
+        info "Found local certificates — including in ISO (dev/test only)..."
+        cp -a "$SCRIPT_DIR/certs"/* "$BUILD_DIR/config/includes.chroot/opt/reset-rollout/certs/" 2>/dev/null || true
+        chmod 700 "$BUILD_DIR/config/includes.chroot/opt/reset-rollout/certs"
+        chmod 600 "$BUILD_DIR/config/includes.chroot/opt/reset-rollout/certs"/* 2>/dev/null || true
+        pass "Certificates copied to ISO (from local ./certs/ directory)."
+    else
+        info "No local certificates found. ISO will reference certs on /mnt/wddata (production mode)."
+        # Still create the directory so encrypt_and_stage.sh can find it
+        mkdir -p "$BUILD_DIR/config/includes.chroot/opt/reset-rollout/certs"
+        echo "# Certificates sourced from forensic USB /mnt/wddata/opt/reset-rollout/certs/ at runtime" > \
+            "$BUILD_DIR/config/includes.chroot/opt/reset-rollout/certs/README.txt"
     fi
 
     # Auto-launch hook — runs Reset-Rollout session init on TTY1 login
@@ -195,6 +217,10 @@ if [[ "$(tty)" == "/dev/tty1" ]] && [[ "$(id -u)" -eq 0 ]]; then
         echo "  DATA_MOUNT: ${DATA_MOUNT:-(not mounted)}"
         echo "  WORK_MOUNT: ${WORK_MOUNT:-(not mounted)}"
         echo "  AUDIT_LOG: $AUDIT_LOG"
+        echo ""
+        echo "  Certificate locations:"
+        echo "    • From forensic USB: /mnt/wddata/opt/reset-rollout/certs/ (preferred)"
+        echo "    • Fallback (if in ISO): /opt/reset-rollout/certs/"
         echo ""
         echo "  Available functions:"
         echo "    safe_stage_file <dst> <src>   — stage files for encryption"
@@ -280,6 +306,10 @@ build() {
     echo ""
     echo -e "${BOLD}  Output : $OUTPUT_ISO${NC}"
     echo -e "${BOLD}  Size   : $size${NC}"
+    echo ""
+    echo "  Certificate source modes:"
+    echo "    • Production: Certs loaded from forensic USB /mnt/wddata/ at boot"
+    echo "    • Development: If ./certs/ exists, certs are baked into ISO"
     echo ""
     echo "  Next step: run build_usb.sh to write the ISO, certificates,"
     echo "  and Windows source files to the deployment USB."
