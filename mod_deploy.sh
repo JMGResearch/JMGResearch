@@ -1,235 +1,217 @@
 #!/bin/bash
 #==============================================================================
-# mod_report.sh
-# Plain text report generation.
-# Compiles audit log, scan results, wipe log, and system info
-# into a single formatted .txt report per machine session.
+# mod_deploy.sh
+# Post-wipe deployment module.
+#
+# Sets the selected Windows ISO as Ventoy's default boot entry,
+# then reboots the system. Ventoy boots the ISO automatically,
+# autounattend.xml is injected, Windows installs unattended,
+# MSDM key pulled from UEFI firmware.
+#
+# After Windows install, firstrun.cmd resets Ventoy default
+# back to wipe ISO for the next machine.
 #==============================================================================
 
 source "$(dirname "${BASH_SOURCE[0]}")/../lib_common.sh"
 
+VENTOY_JSON="$DATA_DIR/ventoy/ventoy.json"
+VENTOY_JSON_BAK="$DATA_DIR/ventoy/ventoy.json.bak"
+
 #──────────────────────────────────────────────────────────────────────────────
-# GENERATE REPORT
+# FIND AVAILABLE WINDOWS ISOS ON WDDATA
 #──────────────────────────────────────────────────────────────────────────────
-generate_report() {
-    local serial="$1"
-    local dev="$2"
-    local report_file="$LOG_DIR/${SESSION_START}_${serial}_REPORT.txt"
-
-    audit_log "INFO" "Generating report: $report_file"
-
-    {
-        echo "============================================================"
-        echo "  WipeDeploy v${WIPEDEPLOY_VERSION} — Session Report"
-        echo "  NIST SP 800-88 Rev.1 Sanitization Toolkit"
-        echo "============================================================"
-        echo ""
-        echo "  Generated : $(date)"
-        echo "  Session   : $SESSION_START"
-        echo ""
-
-        echo "------------------------------------------------------------"
-        echo "  SYSTEM INFORMATION"
-        echo "------------------------------------------------------------"
-        echo "  Serial    : $serial"
-        echo "  Model     : $(get_system_model)"
-        echo "  BIOS Ver  : $(get_bios_version)"
-        echo "  Kernel    : $(uname -r)"
-        echo "  Hostname  : $(hostname 2>/dev/null || echo 'unknown')"
-        echo ""
-
-        echo "  Drive     : $dev"
-        echo "  Type      : $(get_drive_type "$dev")"
-        echo "  Size      : $(get_drive_size "$dev")"
-        echo "  Model     : $(get_drive_model "$dev")"
-        echo "  D.Serial  : $(get_serial "$dev")"
-        echo ""
-
-        local msdm
-        msdm=$(get_msdm_key)
-        if [[ -n "$msdm" ]]; then
-            echo "  MSDM Key  : ${msdm:0:5}XXXXX-XXXXX-XXXXX-XXXXX (redacted)"
-        else
-            echo "  MSDM Key  : NOT FOUND"
-        fi
-        echo ""
-
-        echo "------------------------------------------------------------"
-        echo "  SMART DATA"
-        echo "------------------------------------------------------------"
-        local smart_log
-        smart_log=$(find "$LOG_DIR" -name "smart_${SESSION_START}_*.txt" 2>/dev/null | head -1)
-        if [[ -f "$smart_log" ]]; then
-            # Extract key SMART attributes only
-            grep -E "PASSED|FAILED|Reallocated|Pending|Uncorrectable|Power_On|Temperature" \
-                "$smart_log" 2>/dev/null || echo "  (no SMART data)"
-        else
-            echo "  SMART data not collected this session."
-        fi
-        echo ""
-
-        echo "------------------------------------------------------------"
-        echo "  FORENSIC IMAGING"
-        echo "------------------------------------------------------------"
-        local image_logs
-        image_logs=$(find "$IMAGE_DIR" -name "${serial}_*.log" 2>/dev/null)
-        if [[ -n "$image_logs" ]]; then
-            while IFS= read -r img_log; do
-                echo "  Image log: $(basename "$img_log")"
-                grep -E "Source|Output|SHA256|Verify|End" "$img_log" 2>/dev/null | \
-                    sed 's/^/    /'
-                echo ""
-            done <<< "$image_logs"
-        else
-            echo "  No forensic images taken this session."
-        fi
-
-        echo "------------------------------------------------------------"
-        echo "  FIRMWARE"
-        echo "------------------------------------------------------------"
-        local fw_logs
-        fw_logs=$(find "$FIRMWARE_DIR" -name "${serial}_*.log" 2>/dev/null)
-        if [[ -n "$fw_logs" ]]; then
-            while IFS= read -r fw_log; do
-                echo "  Firmware log: $(basename "$fw_log")"
-                grep -E "SHA256|Verify|Read [0-9]" "$fw_log" 2>/dev/null | \
-                    sed 's/^/    /'
-                echo ""
-            done <<< "$fw_logs"
-        else
-            echo "  No firmware dumps taken this session."
-        fi
-
-        echo "------------------------------------------------------------"
-        echo "  AV / MALWARE SCAN"
-        echo "------------------------------------------------------------"
-        local av_report
-        av_report=$(find "$LOG_DIR" -name "${SESSION_START}_${serial}_av_report.txt" 2>/dev/null | head -1)
-        if [[ -f "$av_report" ]]; then
-            grep -E "Infected|MATCH|Total|Scanned|Rules|Matches" "$av_report" 2>/dev/null | \
-                sed 's/^/  /' || echo "  (no findings)"
-        else
-            echo "  No AV/malware scan performed this session."
-        fi
-        echo ""
-
-        echo "------------------------------------------------------------"
-        echo "  WIPE LOG"
-        echo "------------------------------------------------------------"
-        local wipe_log
-        wipe_log=$(find "$LOG_DIR" -name "${SESSION_START}_${serial}_wipe.log" 2>/dev/null | head -1)
-        if [[ -f "$wipe_log" ]]; then
-            cat "$wipe_log"
-        else
-            echo "  No wipe performed this session."
-        fi
-        echo ""
-
-        echo "------------------------------------------------------------"
-        echo "  NETWORK SCAN"
-        echo "------------------------------------------------------------"
-        local net_log
-        net_log=$(find "$LOG_DIR" -name "${SESSION_START}_${serial}_nmap.txt" 2>/dev/null | head -1)
-        if [[ -f "$net_log" ]]; then
-            head -30 "$net_log" 2>/dev/null | sed 's/^/  /'
-            echo "  ... (full report: $(basename "$net_log"))"
-        else
-            echo "  No network scan performed this session."
-        fi
-        echo ""
-
-        echo "------------------------------------------------------------"
-        echo "  FULL AUDIT LOG"
-        echo "------------------------------------------------------------"
-        if [[ -f "$AUDIT_LOG" ]]; then
-            cat "$AUDIT_LOG"
-        else
-            echo "  Audit log not found."
-        fi
-        echo ""
-
-        echo "============================================================"
-        echo "  END OF REPORT"
-        echo "  $(date)"
-        echo "============================================================"
-
-    } > "$report_file"
-
-    audit_log "INFO" "Report generated: $report_file"
-
-    msg_box "Report Generated" \
-"Session report saved.
-
-  File: $(basename "$report_file")
-  Path: $LOG_DIR"
-
-    # Offer to view
-    if confirm "View Report" "View the report now?"; then
-        dialog --backtitle "WipeDeploy v${WIPEDEPLOY_VERSION}" \
-               --title "Session Report — $serial" \
-               --textbox "$report_file" \
-               22 78
-    fi
+find_windows_isos() {
+    WIN10_ISO=$(find "$DATA_DIR" -maxdepth 1 -iname "*10*.iso" 2>/dev/null | head -1)
+    WIN11_ISO=$(find "$DATA_DIR" -maxdepth 1 -iname "*11*.iso" 2>/dev/null | head -1)
 }
 
 #──────────────────────────────────────────────────────────────────────────────
-# VIEW EXISTING REPORTS
+# SELECT WINDOWS VERSION
 #──────────────────────────────────────────────────────────────────────────────
-view_reports() {
-    local reports
-    reports=$(find "$LOG_DIR" -name "*_REPORT.txt" 2>/dev/null | sort -r)
-
-    if [[ -z "$reports" ]]; then
-        msg_box "No Reports" "No reports found in $LOG_DIR."
-        return
-    fi
+select_windows_iso() {
+    find_windows_isos
 
     local menu_items=()
-    while IFS= read -r rpt; do
-        menu_items+=("$rpt" "$(basename "$rpt")")
-    done <<< "$reports"
+    [[ -n "$WIN10_ISO" ]] && menu_items+=("10" "Windows 10 — $(basename "$WIN10_ISO")")
+    [[ -n "$WIN11_ISO" ]] && menu_items+=("11" "Windows 11 — $(basename "$WIN11_ISO")")
+
+    if [[ ${#menu_items[@]} -eq 0 ]]; then
+        msg_box "No Windows ISOs" \
+"No Windows ISOs found on WDDATA.
+
+Expected naming:
+  *10*.iso  — Windows 10
+  *11*.iso  — Windows 11
+
+Copy ISOs to the root of the WDDATA partition."
+        return 1
+    fi
+
+    # Check MSDM key
+    local msdm_key
+    msdm_key=$(get_msdm_key)
+    local msdm_info
+    if [[ -n "$msdm_key" ]]; then
+        msdm_info="MSDM key: FOUND (key will be used automatically)"
+    else
+        msdm_info="MSDM key: NOT FOUND (manual activation may be needed)"
+    fi
 
     local choice
     choice=$(dialog --backtitle "WipeDeploy v${WIPEDEPLOY_VERSION}" \
-                    --title "View Reports" \
-                    --menu "Select report to view:" \
-                    18 78 10 \
+                    --title "Select Windows Version" \
+                    --menu \
+"$msdm_info
+
+Select Windows version to install:" \
+                    14 65 4 \
                     "${menu_items[@]}" \
                     3>&1 1>&2 2>&3)
 
-    [[ $? -ne 0 || -z "$choice" ]] && return
+    [[ $? -ne 0 ]] && return 1
 
-    dialog --backtitle "WipeDeploy v${WIPEDEPLOY_VERSION}" \
-           --title "Report — $(basename "$choice")" \
-           --textbox "$choice" \
-           22 78
+    case "$choice" in
+        10) SELECTED_ISO="$WIN10_ISO" ;;
+        11) SELECTED_ISO="$WIN11_ISO" ;;
+    esac
+
+    audit_log "INFO" "Windows ISO selected: $SELECTED_ISO"
+    return 0
 }
 
 #──────────────────────────────────────────────────────────────────────────────
-# REPORT MENU
+# UPDATE VENTOY.JSON — set default boot ISO
+# Ventoy reads VTOY_DEFAULT_IMAGE on boot and auto-selects that ISO
 #──────────────────────────────────────────────────────────────────────────────
-report_menu() {
-    local serial="$1"
-    local dev="$2"
+set_ventoy_default() {
+    local iso_path="$1"
+    local iso_name
+    iso_name="/$(basename "$iso_path")"
 
-    while true; do
-        local choice
-        choice=$(dialog --backtitle "WipeDeploy v${WIPEDEPLOY_VERSION}" \
-                        --title "Reports" \
-                        --menu \
-"Serial : $serial
-Session: $SESSION_START" \
-                        12 55 4 \
-                        "1" "Generate session report" \
-                        "2" "View existing reports" \
-                        "3" "Back to main menu" \
-                        3>&1 1>&2 2>&3)
+    if [[ ! -f "$VENTOY_JSON" ]]; then
+        audit_log "WARN" "ventoy.json not found: $VENTOY_JSON — creating minimal config"
+        mkdir -p "$(dirname "$VENTOY_JSON")"
+        echo '{}' > "$VENTOY_JSON"
+    fi
 
-        [[ $? -ne 0 || "$choice" == "3" ]] && break
+    # Backup current config
+    cp "$VENTOY_JSON" "$VENTOY_JSON_BAK"
 
-        case "$choice" in
-            1) generate_report "$serial" "$dev" ;;
-            2) view_reports ;;
-        esac
-    done
+    # Use python3 to safely update JSON
+    # Falls back to sed if python3 not available
+    if command -v python3 &>/dev/null; then
+        python3 - <<PYEOF
+import json, sys
+
+with open("$VENTOY_JSON", "r") as f:
+    try:
+        cfg = json.load(f)
+    except:
+        cfg = {}
+
+# Set default image
+if "control" not in cfg:
+    cfg["control"] = []
+
+# Remove any existing VTOY_DEFAULT_IMAGE entry
+cfg["control"] = [c for c in cfg["control"]
+                  if "VTOY_DEFAULT_IMAGE" not in c]
+
+# Add new default
+cfg["control"].append({"VTOY_DEFAULT_IMAGE": "$iso_name"})
+# Set timeout to 0 for fully automatic boot
+cfg["control"] = [c for c in cfg["control"]
+                  if "VTOY_MENU_TIMEOUT" not in c]
+cfg["control"].append({"VTOY_MENU_TIMEOUT": "0"})
+
+with open("$VENTOY_JSON", "w") as f:
+    json.dump(cfg, f, indent=4)
+
+print("ventoy.json updated")
+PYEOF
+    else
+        # Fallback — append control block
+        audit_log "WARN" "python3 not available — using sed fallback for ventoy.json"
+        sed -i "s|\"VTOY_DEFAULT_IMAGE\".*|\"VTOY_DEFAULT_IMAGE\": \"$iso_name\"|g" \
+            "$VENTOY_JSON" 2>/dev/null || true
+    fi
+
+    audit_log "INFO" "Ventoy default set to: $iso_name"
+}
+
+#──────────────────────────────────────────────────────────────────────────────
+# DEPLOY — full workflow
+#──────────────────────────────────────────────────────────────────────────────
+deploy_windows() {
+    # Select ISO
+    if ! select_windows_iso; then return 1; fi
+
+    # Partition disk for Windows before reboot
+    # GPT: EFI (100MB) + MSR (16MB) + Windows (rest)
+    local target_dev="$REPLY_DEVICE"
+
+    if [[ -z "$target_dev" ]]; then
+        msg_box "No Target" "No target device set. Run wipe first."
+        return 1
+    fi
+
+    if ! confirm "Partition for Windows" \
+"Prepare $target_dev for Windows installation?
+
+  EFI System Partition : 100MB (FAT32)
+  Microsoft Reserved   : 16MB
+  Windows              : remaining space (NTFS)
+
+This creates the partition layout Windows setup expects."; then
+        return 1
+    fi
+
+    info_box "Partitioning" "Creating Windows partition layout on $target_dev..." 2
+
+    parted -s "$target_dev" \
+        mklabel gpt \
+        mkpart "EFI"     fat32  1MiB    101MiB \
+        set 1 esp on \
+        mkpart "MSR"     ""     101MiB  117MiB \
+        set 2 msftres on \
+        mkpart "Windows" ntfs   117MiB  100% 2>/dev/null
+
+    partprobe "$target_dev"
+
+    audit_log "INFO" "Windows partition layout created: $target_dev"
+
+    # Format EFI partition
+    local efi_part
+    efi_part=$(lsblk -lnpo NAME "$target_dev" | sed -n '2p')
+    mkfs.fat -F32 -n "EFI" "$efi_part" 2>/dev/null || true
+
+    # Set Ventoy to boot selected ISO automatically
+    set_ventoy_default "$SELECTED_ISO"
+
+    # Final confirmation before reboot
+    if ! confirm "Ready to Deploy" \
+"System is ready for Windows deployment.
+
+  Target  : $target_dev
+  ISO     : $(basename "$SELECTED_ISO")
+  Key     : $(get_msdm_key | head -c 5)XXXXX-XXXXX-XXXXX-XXXXX
+
+On reboot:
+  1. Ventoy will auto-boot $(basename "$SELECTED_ISO")
+  2. Windows setup runs unattended
+  3. MSDM key activates automatically
+
+REBOOT NOW?"; then
+        # Restore ventoy.json if operator cancels
+        [[ -f "$VENTOY_JSON_BAK" ]] && cp "$VENTOY_JSON_BAK" "$VENTOY_JSON"
+        audit_log "INFO" "Deploy cancelled at reboot confirmation"
+        return 1
+    fi
+
+    audit_log "INFO" "Rebooting for Windows deployment: $(basename "$SELECTED_ISO")"
+    session_close "DEPLOY_REBOOT"
+
+    sync
+    sleep 2
+    reboot
 }
